@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<title>DON’T TOUCH RED</title>
+<style>
+:root{--bg:#eef0f6;--fg:#161a2e;--board:#10142a;--btn:#2b3358;--btnfg:#fff;color-scheme:light dark;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0b0e1c;--fg:#e8eaf6}}
+:root[data-theme="dark"]{--bg:#0b0e1c;--fg:#e8eaf6}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font-family:"Trebuchet MS",system-ui,sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;user-select:none;-webkit-user-select:none;touch-action:manipulation}
+#hud{display:flex;gap:20px;align-items:center;font-size:20px;font-weight:700}
+#mu{background:var(--btn);color:var(--btnfg);border:0;border-radius:8px;font-size:18px;padding:4px 10px;cursor:pointer}
+#wrap{position:relative;height:min(60vh,480px);aspect-ratio:300/480}
+canvas{width:100%;height:100%;background:var(--board);border-radius:10px;display:block;touch-action:none}
+#ov{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;background:rgba(10,12,28,.84);border-radius:10px;color:#fff;text-align:center;padding:16px}
+#ov h1{margin:0;font-size:26px}
+#ov p{margin:0;font-size:15px;max-width:250px;line-height:1.4}
+.btn{background:#e53935;color:#fff;border:0;border-radius:10px;padding:12px 26px;font-size:18px;font-weight:700;cursor:pointer}
+#pad{display:flex;gap:12px}
+#pad button{width:78px;height:60px;border:0;border-radius:12px;background:var(--btn);color:var(--btnfg);font-size:26px}
+#pad button:active{filter:brightness(1.4)}
+#pad #f{width:110px;background:#e53935;font-size:20px}
+</style>
+</head>
+<body>
+<div id="hud"><span>Score: <b id="sc">0</b></span><span>Lives: <b id="lv">3</b></span><button id="mu" aria-label="Sound">🔊</button></div>
+<div id="wrap">
+<canvas id="c" width="300" height="480"></canvas>
+<div id="ov"><h1 id="t">DON’T TOUCH RED</h1><p id="d">Tap the screen to aim and shoot your bow, or use ◀ ▶ and Fire. Shoot the shapes, but never hit a red one!</p><button class="btn" id="go">Start</button></div>
+</div>
+<div id="pad"><button id="l">◀</button><button id="f">Fire</button><button id="r">▶</button></div>
+<script>
+const cv=document.getElementById('c'),ctx=cv.getContext('2d');
+const W=300,H=480,R=22,BX=W/2,BY=H-26,SY=H-70;
+const TYPES=['circle','square','triangle','rhombus'];
+const COL=['#e53935','#42a5f5','#66bb6a','#ffd54f','#ab47bc','#ff9800','#26c6da'];
+const RED=COL[0];
+let P,B,th,score,lives,over,run,last,spawnT,cd;
+const key={l:0,r:0,f:0};
+/* ---------- audio (synthesized, no files) ---------- */
+let AC=null,master=null,muted=false,mTimer=null,mStep=0,nextT=0;
+const hz=n=>440*Math.pow(2,(n-69)/12);
+const CH=[[57,60,64],[53,57,60],[60,64,67],[55,59,62]],BS=[45,41,48,43],ARP=[0,1,2,1,0,1,2,1],SPB=60/128/2;
+function audioInit(){
+  if(AC){if(AC.state==='suspended')AC.resume();return;}
+  try{AC=new(window.AudioContext||window.webkitAudioContext)();master=AC.createGain();master.gain.value=muted?0:0.5;master.connect(AC.destination);}catch(e){AC=null;}
+}
+function tone(f,t,d,type,v,f2){
+  if(!AC)return;
+  const o=AC.createOscillator(),g=AC.createGain();o.type=type;o.frequency.setValueAtTime(f,t);
+  if(f2)o.frequency.exponentialRampToValueAtTime(f2,t+d);
+  g.gain.setValueAtTime(v,t);g.gain.exponentialRampToValueAtTime(0.001,t+d);
+  o.connect(g);g.connect(master);o.start(t);o.stop(t+d+0.02);
+}
+function beat(s,t){
+  const bar=(s>>3)&3,c=CH[bar];
+  if(s%2===0)tone(hz(BS[bar]),t,0.2,'triangle',0.3);
+  if(s%4===0)tone(120,t,0.12,'sine',0.35,40);
+  tone(hz(c[ARP[s&7]]+12),t,0.13,'square',0.05);
+  if(s%8===6)tone(hz(c[2]+24),t,0.2,'square',0.035);
+}
+function sched(){
+  if(!AC)return;
+  while(nextT<AC.currentTime+0.25){beat(mStep,nextT);nextT+=SPB;mStep=(mStep+1)&31;}
+}
+function musicOn(){if(!AC||mTimer)return;nextT=AC.currentTime+0.05;mStep=0;mTimer=setInterval(sched,80);}
+function musicOff(){clearInterval(mTimer);mTimer=null;}
+function sfx(k){
+  if(!AC)return;const t=AC.currentTime;
+  if(k==='shot')tone(700,t,0.1,'square',0.08,200);
+  else if(k==='hit'){tone(880,t,0.1,'triangle',0.2);tone(1320,t+0.06,0.14,'triangle',0.2);}
+  else if(k==='lose')tone(180,t,0.3,'sawtooth',0.15,60);
+  else if(k==='over')[400,320,250,160].forEach((f,i)=>tone(f,t+i*0.18,0.25,'sawtooth',0.15));
+}
+document.getElementById('mu').onclick=()=>{
+  muted=!muted;audioInit();if(master)master.gain.value=muted?0:0.5;
+  document.getElementById('mu').textContent=muted?'🔇':'🔊';
+};
+document.addEventListener('visibilitychange',()=>{if(AC){document.hidden?AC.suspend():AC.resume();}});
+/* ---------- game ---------- */
+function reset(){P=[];B=[];th=Math.PI/2;score=0;lives=3;over=false;spawnT=0;cd=0;}
+function spawn(){
+  P.push({t:TYPES[Math.random()*4|0],col:Math.random()<0.28?RED:COL[1+(Math.random()*6|0)],x:R+Math.random()*(W-2*R),y:-R});
+}
+function end(why){
+  over=true;run=false;musicOff();sfx('over');
+  document.getElementById('t').textContent='GAME OVER';
+  document.getElementById('d').textContent=(why==='red'?'You shot a red shape!':'Too many shapes got past you!')+' Score: '+score;
+  document.getElementById('go').textContent='Play again';
+  document.getElementById('ov').style.display='flex';
+}
+function tri(px,py,a,b,c){
+  const s=(p1,p2,p3)=>(px-p3[0])*(p1[1]-p3[1])-(p1[0]-p3[0])*(py-p3[1]);
+  const d1=s(a,b,c),d2=s(b,c,a),d3=s(c,a,b);
+  return !((d1<0||d2<0||d3<0)&&(d1>0||d2>0||d3>0));
+}
+function hit(p,x,y){
+  const dx=x-p.x,dy=y-p.y;
+  if(p.t==='circle')return dx*dx+dy*dy<=R*R;
+  if(p.t==='square')return Math.abs(dx)<=R*0.9&&Math.abs(dy)<=R*0.9;
+  if(p.t==='rhombus')return Math.abs(dx)+Math.abs(dy)<=R*1.2;
+  return tri(dx,dy,[0,-R],[-R,R*0.8],[R,R*0.8]);
+}
+function fire(){
+  if(cd>0||!run)return;
+  B.push({x:BX+Math.cos(th)*30,y:BY-Math.sin(th)*30,vx:Math.cos(th)*600,vy:-Math.sin(th)*600});cd=0.25;sfx('shot');
+}
+function aimAt(x,y){
+  const a=Math.atan2(-(y-BY),x-BX);
+  th=a<0?(x<BX?Math.PI:0):a;
+}
+function step(dt){
+  const spd=Math.min(45+score*0.25,170);
+  spawnT-=dt;
+  if(spawnT<=0){spawn();spawnT=Math.max(1.8-score/500,0.8);}
+  th+=(key.l-key.r)*2.4*dt;th=Math.max(0,Math.min(Math.PI,th));
+  cd-=dt;if(key.f)fire();
+  P.forEach(p=>p.y+=spd*dt);
+  for(const b of B){
+    const n=Math.ceil(Math.hypot(b.vx,b.vy)*dt/8);
+    for(let i=0;i<n&&!b.dead;i++){
+      b.x+=b.vx*dt/n;b.y+=b.vy*dt/n;
+      for(const p of P){
+        if(p.dead)continue;
+        if(hit(p,b.x,b.y)){
+          b.dead=true;
+          if(p.col===RED){end('red');return;}
+          p.dead=true;score+=10;sfx('hit');break;
+        }
+      }
+    }
+    if(b.x<-20||b.x>W+20||b.y<-20)b.dead=true;
+  }
+  B=B.filter(b=>!b.dead);
+  for(const p of P){
+    if(!p.dead&&p.y+R>=SY){
+      p.dead=true;
+      if(p.col!==RED){lives--;sfx('lose');if(lives<=0){lives=0;end('lives');return;}}
+    }
+  }
+  P=P.filter(p=>!p.dead);
+}
+function path(p){
+  ctx.beginPath();
+  if(p.t==='circle')ctx.arc(p.x,p.y,R,0,7);
+  else if(p.t==='square')ctx.roundRect(p.x-R*0.9,p.y-R*0.9,R*1.8,R*1.8,5);
+  else if(p.t==='rhombus'){ctx.moveTo(p.x,p.y-R*1.2);ctx.lineTo(p.x+R*1.2,p.y);ctx.lineTo(p.x,p.y+R*1.2);ctx.lineTo(p.x-R*1.2,p.y);ctx.closePath();}
+  else{ctx.moveTo(p.x,p.y-R);ctx.lineTo(p.x+R,p.y+R*0.8);ctx.lineTo(p.x-R,p.y+R*0.8);ctx.closePath();}
+}
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  ctx.strokeStyle='rgba(255,255,255,.2)';ctx.setLineDash([6,6]);ctx.lineWidth=1;
+  ctx.beginPath();ctx.moveTo(0,SY);ctx.lineTo(W,SY);ctx.stroke();
+  ctx.strokeStyle='rgba(255,255,255,.25)';
+  ctx.beginPath();ctx.moveTo(BX,BY);ctx.lineTo(BX+Math.cos(th)*420,BY-Math.sin(th)*420);ctx.stroke();ctx.setLineDash([]);
+  P.forEach(p=>{path(p);ctx.fillStyle=p.col;ctx.fill();ctx.strokeStyle='rgba(255,255,255,.55)';ctx.lineWidth=2;ctx.stroke();});
+  ctx.strokeStyle='#fff';ctx.lineWidth=3;ctx.lineCap='round';
+  B.forEach(b=>{const m=Math.hypot(b.vx,b.vy);ctx.beginPath();ctx.moveTo(b.x,b.y);ctx.lineTo(b.x-b.vx/m*16,b.y-b.vy/m*16);ctx.stroke();});
+  ctx.save();ctx.translate(BX,BY);ctx.rotate(Math.PI/2-th);
+  ctx.strokeStyle='#ffb74d';ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(-24,4);ctx.quadraticCurveTo(0,-34,24,4);ctx.stroke();
+  ctx.strokeStyle='#e8eaf6';ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(-24,4);ctx.lineTo(0,cd>0?4:10);ctx.lineTo(24,4);ctx.stroke();
+  if(cd<=0){ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(0,10);ctx.lineTo(0,-26);ctx.stroke();}
+  ctx.restore();
+  document.getElementById('sc').textContent=score;
+  document.getElementById('lv').textContent=lives;
+}
+function loop(t){
+  if(!run)return;
+  const dt=Math.min((t-last)/1000,0.05);last=t;
+  step(dt);draw();
+  if(run)requestAnimationFrame(loop);
+}
+function start(){
+  audioInit();reset();document.getElementById('ov').style.display='none';
+  run=true;last=performance.now();musicOn();draw();requestAnimationFrame(loop);
+}
+document.getElementById('go').onclick=start;
+function pt(e){const r=cv.getBoundingClientRect();return[(e.clientX-r.left)*W/r.width,(e.clientY-r.top)*H/r.height];}
+let down=false;
+cv.addEventListener('pointerdown',e=>{e.preventDefault();down=true;const[x,y]=pt(e);aimAt(x,y);fire();});
+cv.addEventListener('pointermove',e=>{if(down||e.pointerType==='mouse'){const[x,y]=pt(e);aimAt(x,y);}});
+addEventListener('pointerup',()=>down=false);
+function bind(id,k){
+  const e=document.getElementById(id);
+  const on=ev=>{ev.preventDefault();key[k]=1;},off=ev=>{ev.preventDefault();key[k]=0;};
+  e.addEventListener('pointerdown',on);e.addEventListener('pointerup',off);e.addEventListener('pointerleave',off);e.addEventListener('pointercancel',off);
+}
+bind('l','l');bind('r','r');bind('f','f');
+const map={ArrowLeft:'l',a:'l',A:'l',ArrowRight:'r',d:'r',D:'r',' ':'f',ArrowUp:'f'};
+addEventListener('keydown',e=>{if(map[e.key]){key[map[e.key]]=1;e.preventDefault();}});
+addEventListener('keyup',e=>{if(map[e.key])key[map[e.key]]=0;});
+try{const tg=window.Telegram&&Telegram.WebApp;if(tg){tg.ready();tg.expand();if(tg.disableVerticalSwipes)tg.disableVerticalSwipes();}}catch(e){}
+reset();draw();
+</script>
+</body>
+</html>
